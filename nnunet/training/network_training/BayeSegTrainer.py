@@ -14,12 +14,10 @@ import torch.nn.functional as F
 import math
 from torch.nn import init as init
 from torch.nn.modules.batchnorm import _BatchNorm
-from batchgenerators.utilities.file_and_folder_operations import *
 from torch.cuda.amp import autocast
 from nnunet.utilities.to_torch import maybe_to_torch, to_cuda
 from nnunet.training.data_augmentation.default_data_augmentation import get_default_augmentation
 import numpy as np
-
 
 
 @torch.no_grad()
@@ -122,17 +120,18 @@ class Upsample(nn.Sequential):
         super(Upsample, self).__init__(*m)
         
         
-
 class ResNet(nn.Module):
     def __init__(self,
                  num_in_ch=1,
                  num_out_ch=1,
                  num_feat=64,
                  num_block=10,
-                bn = False):
+                 bn = False):
         super(ResNet, self).__init__()
         if num_in_ch != 1:
             self.pseudo_3d = True
+        else:
+            self.pseudo_3d = False
         self.conv_first = nn.Conv2d(num_in_ch, num_feat, 3, 1, 1)
         self.body = make_layer(ResBlock, num_block, n_feats=num_feat, bn = bn)
         self.conv_last = nn.Conv2d(num_feat, num_out_ch, 3, 1, 1)
@@ -175,22 +174,21 @@ class BayeSeg(SegmentationNetwork):
         
         # reconstruct clean image x and infer noise
         self.res_clean = ResNet(num_in_ch=self.args.pseudo_3d_slices, num_out_ch = 2)
-        self.res_noise = ResNet(num_in_ch=self.args.pseudo_3d_slices, num_out_ch = 2, num_block=6, bn=True) #推断噪声的话，也许加BN的效果会更好一些？
+        self.res_noise = ResNet(num_in_ch=self.args.pseudo_3d_slices, num_out_ch = 2, num_block=6, bn=True)  # 推断噪声的话，也许加BN的效果会更好一些？
         # pred mu and log var unit for seg_masks: B x K x W x H
         self.unet = unet
         
         # postprecess
         self.softmax = nn.Softmax(dim=1)
         
-        # TODO: modify Dx & Dz 
+        # TODO: modify Dx & Dz
         Dx = torch.zeros([1,1,3,3],dtype=torch.float)
         Dx[:,:,1,1] = 1
         Dx[:,:,1,0] = Dx[:,:,1,2] = Dx[:,:,0,1] = Dx[:,:,2,1] = -1/4
         self.Dx = nn.Parameter(data=Dx, requires_grad=False)
         
-        
     def generate_m(self, samples):
-        #m : mean of noise
+        # m : mean of noise
         feature = self.res_noise(samples)
         mu_m, log_var_m = torch.chunk(feature, 2, dim=1)
         log_var_m = torch.clamp(log_var_m, -20, 0)
@@ -198,7 +196,7 @@ class BayeSeg(SegmentationNetwork):
         return m, mu_m, log_var_m
     
     def generate_x(self, samples):
-        #x : clean image
+        # x : clean image
         feature = self.res_clean(samples)
         mu_x, log_var_x = torch.chunk(feature, 2, dim=1)
         log_var_x = torch.clamp(log_var_x, -20, 0)
@@ -206,7 +204,7 @@ class BayeSeg(SegmentationNetwork):
         return x, mu_x, log_var_x
     
     def generate_z(self, x):
-        #z : Seg logit
+        # z : Seg logit
         feature = self.unet(x)
         mu_z, log_var_z = torch.chunk(feature, 2, dim=1)
         log_var_z = torch.clamp(log_var_z, -20, 0)
@@ -220,7 +218,7 @@ class BayeSeg(SegmentationNetwork):
 
         K = self.num_classes
         
-        #compute VB params
+        # compute VB params
         ###################################
         # noise std rho
         if self.args.pseudo_3d_slices != 1:
@@ -234,11 +232,11 @@ class BayeSeg(SegmentationNetwork):
         alpha_upsilon_hat = 2*self.args.gamma_upsilon + K
         difference_x = F.conv2d(mu_x, self.Dx, padding=1)
         beta_upsilon_hat = torch.sum(mu_z*(difference_x*difference_x + 2*torch.exp(log_var_x)),
-                                     dim = 1, keepdim = True) + 2*self.args.phi_upsilon # B x 1 x W x H
+                                     dim = 1, keepdim = True) + 2*self.args.phi_upsilon  # B x 1 x W x H
         mu_upsilon_hat = alpha_upsilon_hat / beta_upsilon_hat
        
         # Seg boundary omega
-        difference_z = F.conv2d(mu_z, self.Dx.expand(K,1,3,3), padding=1, groups=K) # B x K x W x H
+        difference_z = F.conv2d(mu_z, self.Dx.expand(K,1,3,3), padding=1, groups=K)  # B x K x W x H
         alpha_omega_hat = 2*self.args.gamma_omega + 1
         pseudo_pi = torch.mean(mu_z, dim=(2,3), keepdim=True)
         beta_omega_hat = pseudo_pi*(difference_z*difference_z + 2*torch.exp(log_var_z)) + 2*self.args.phi_omega
@@ -257,28 +255,30 @@ class BayeSeg(SegmentationNetwork):
         kl_sigma_z = torch.sum(digamma_pi.detach()*(2*torch.exp(log_var_z)*mu_omega_hat.detach() - log_var_z), dim=1)
         
         kl_mu_x = torch.sum(difference_x*difference_x*mu_upsilon_hat.detach()*mu_z.detach(), dim=1)
-        kl_sigma_x = torch.sum(2*torch.exp(log_var_x)*mu_upsilon_hat.detach()*mu_z.detach(), dim=1) - log_var_x 
+        kl_sigma_x = torch.sum(2*torch.exp(log_var_x)*mu_upsilon_hat.detach()*mu_z.detach(), dim=1) - log_var_x
         
         kl_mu_m = self.args.sigma_0*mu_m*mu_m
         kl_sigma_m = self.args.sigma_0*torch.exp(log_var_m) - log_var_m
 
-        visualize = {'recon':torch.concat([x, mu_x, torch.exp(log_var_x/2)]),
+        visualize = {
+                     'recon':torch.concat([x, mu_x, torch.exp(log_var_x/2)]),
                      'noise':torch.concat([n, m, 1/mu_rho_hat.sqrt()]),
                      'logit':torch.concat([z[:,2:3,...], mu_z[:,2:3,...], torch.exp(log_var_z/2)[:,2:3,...]]),
                      'lines':mu_upsilon_hat, 'contour': mu_omega_hat[:,2:3,...],
                     }
 
-        #visualize = {'y': samples, 'n': n, 'm': m, 'rho': mu_rho_hat, 'x': x, 'upsilon': mu_upsilon_hat, 'z': z, 'omega': mu_omega_hat}
+        # visualize = {'y': samples, 'n': n, 'm': m, 'rho': mu_rho_hat, 'x': x, 'upsilon': mu_upsilon_hat, 'z': z, 'omega': mu_omega_hat}
         pred = z if self.training else mu_z
-        out = {'pred_masks': pred, 'kl_y':kl_y,
+        out = {
+               'pred_masks': pred, 'kl_y':kl_y,
                'kl_mu_z':kl_mu_z, 'kl_sigma_z':kl_sigma_z,
                'kl_mu_x':kl_mu_x, 'kl_sigma_x':kl_sigma_x,
                'kl_mu_m':kl_mu_m, 'kl_sigma_m':kl_sigma_m,
                'normalization': normalization,
-               'rho':mu_rho_hat, 
+               'rho':mu_rho_hat,
                'omega':mu_omega_hat*digamma_pi,
                'upsilon':mu_upsilon_hat*mu_z,
-               'visualize':visualize, 
+               'visualize':visualize,
               }
         return out
 
@@ -331,7 +331,7 @@ class BayeSeg(SegmentationNetwork):
 
 
 class BayeSeg_loss(DC_and_CE_loss):
-    def __init__(self, soft_dice_kwargs, ce_kwargs, aggregate="sum", square_dice=False, weight_ce=1, weight_dice=1, 
+    def __init__(self, soft_dice_kwargs, ce_kwargs, aggregate="sum", square_dice=False, weight_ce=1, weight_dice=1,
                  log_dice=False, ignore_label=None):
         super().__init__(soft_dice_kwargs, ce_kwargs, aggregate, square_dice, weight_ce, weight_dice, log_dice, ignore_label)
     
@@ -359,7 +359,7 @@ class BayeSeg_loss(DC_and_CE_loss):
         if self.aggregate == "sum":
             result = self.weight_ce * ce_loss + self.weight_dice * dc_loss
         else:
-            raise NotImplementedError("nah son") # reserved for other stuff (later)
+            raise NotImplementedError("nah son")  # reserved for other stuff (later)
         
         N = net_output['normalization']
         loss_y = torch.sum(net_output['kl_y']) / N
@@ -371,7 +371,7 @@ class BayeSeg_loss(DC_and_CE_loss):
         loss_sigma_z = torch.sum(net_output['kl_sigma_z']) / N
         loss_Bayes = loss_y + loss_mu_m + loss_sigma_m + loss_mu_x + loss_sigma_x + loss_mu_z + loss_sigma_z
 
-        # result += 100 * loss_Bayes
+        result += 100 * loss_Bayes
 
         return result
 
@@ -416,11 +416,11 @@ class BayeSegTrainer(nnUNetTrainer):
         self.load_dataset()
         self.do_split()
         dl_tr = DataLoader_pseudo3D(self.dataset_tr, self.basic_generator_patch_size, self.patch_size, self.batch_size,
-                                oversample_foreground_percent=self.oversample_foreground_percent, pad_mode="constant", 
-                                pad_sides=self.pad_all_sides, memmap_mode='r', pseudo_3d_slices=self.args.pseudo_3d_slices)
+                                    oversample_foreground_percent=self.oversample_foreground_percent, pad_mode="constant",
+                                    pad_sides=self.pad_all_sides, memmap_mode='r', pseudo_3d_slices=self.args.pseudo_3d_slices)
         dl_val = DataLoader_pseudo3D(self.dataset_val, self.patch_size, self.patch_size, self.batch_size,
-                                oversample_foreground_percent=self.oversample_foreground_percent, pad_mode="constant", 
-                                pad_sides=self.pad_all_sides, memmap_mode='r', pseudo_3d_slices=self.args.pseudo_3d_slices)
+                                     oversample_foreground_percent=self.oversample_foreground_percent, pad_mode="constant",
+                                     pad_sides=self.pad_all_sides, memmap_mode='r', pseudo_3d_slices=self.args.pseudo_3d_slices)
         return dl_tr, dl_val
 
     def initialize_network(self):
@@ -449,8 +449,7 @@ class BayeSegTrainer(nnUNetTrainer):
                 use_mask_for_norm[i] = True
             self.data_aug_params["mask_was_used_for_normalization"] = use_mask_for_norm
 
-        self.folder_with_preprocessed_data = join(self.dataset_directory, self.plans['data_identifier'] +
-                                                  "_stage%d" % self.stage)
+        self.folder_with_preprocessed_data = join(self.dataset_directory, self.plans['data_identifier']+"_stage%d" % self.stage)
 
         if training:
             self.dl_tr, self.dl_val = self.get_basic_generators()
@@ -496,7 +495,6 @@ class BayeSegTrainer(nnUNetTrainer):
             bbx1, bby1, bbx2, bby2 = rand_bbox(data.size(), lam)
             data[:, :, bbx1:bbx2, bby1:bby2] = data[rand_index, :, bbx1:bbx2, bby1:bby2]
             target[:, :, bbx1:bbx2, bby1:bby2] = target[rand_index, :, bbx1:bbx2, bby1:bby2]
-
 
         self.optimizer.zero_grad()
 
@@ -711,8 +709,7 @@ class DataLoader_pseudo3D(DataLoader2D):
             # be padded with -1 constant whereas seg_from_previous_stage needs to be padded with 0s (we could also
             # remove label -1 in the data augmentation but this way it is less error prone)
 
-            case_all_data = case_all_data[:, valid_bbox_x_lb:valid_bbox_x_ub,
-                            valid_bbox_y_lb:valid_bbox_y_ub]
+            case_all_data = case_all_data[:, valid_bbox_x_lb:valid_bbox_x_ub, valid_bbox_y_lb: valid_bbox_y_ub]
 
             case_all_data_donly = np.pad(case_all_data[:-1], ((0, 0),
                                                               (-min(0, bbox_x_lb), max(bbox_x_ub - shape[0], 0)),

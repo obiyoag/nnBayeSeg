@@ -8,10 +8,11 @@
             "name": "Python: Current File",
             "type": "python",
             "request": "launch",
-            "program": "${file}",
+            "program": "/home/gaoyibo/nnBayeSeg/nnunet/run/new_run_training.py",
             "console": "integratedTerminal",
             "justMyCode": true,
-            "args": ["2d", "BayeSegTrainer", "Task501_FeTA2", "0", "--npz", "--batch_size", "2", "--pseudo_3d_slices", "3", "--cutmix_prob", "1.0"]
+            "env": {"CUDA_VISIBLE_DEVICES":"0"},
+            "args": ["2d", "BayeSegTrainer", "Task501_FeTA2", "0", "--npz", "--batch_size", "2", "--pseudo_3d_slices", "3", "--cutmix_prob", "0.5"]
             // "args": ["--task_name", "Task600_FeTA_cutmix", "--institution", "both"]
             // "args": ["2d", "BayeSegTrainer", "Task500_FeTA", "0", "--npz", "-val", "--valbest"]
             // "args": ["-i", "/home/gaoyibo/Datasets/nnUNet_datasets/nnUNet_raw_data_base/nnUNet_raw_data/Task500_FeTA2/imagesTr", 

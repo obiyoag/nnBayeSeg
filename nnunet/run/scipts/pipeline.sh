@@ -5,10 +5,10 @@ for resample_prob in $RESAMPLE_PROB
 do
 	task_name="Task${task_id}_resample_prob=${resample_prob}"
 
-	python -u data_convert.py --task_name ${task_name}
+	python -u ../data_convert.py --task_name ${task_name}
 	nnUNet_plan_and_preprocess -t ${task_id}
 
-	CUDA_VISIBLE_DEVICES=1 python -u new_run_training.py 2d BayeSegTrainer ${task_name} 0 --npz --batch_size 56 --resample_prob ${resample_prob}
+	CUDA_VISIBLE_DEVICES=1 python -u ../new_run_training.py 2d BayeSegTrainer ${task_name} 0 --npz --batch_size 56 --resample_prob ${resample_prob}
 
 	input_folder="${data_base}/Task501_FeTA2/imagesTr"
 	output_folder="${data_base}/${task_name}/predictions"

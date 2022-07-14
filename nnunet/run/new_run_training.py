@@ -112,7 +112,7 @@ def main():
     parser.add_argument('--batch_size', default=16, type=int)
     parser.add_argument('--epochs', default=1000, type=int)
 
-    parser.add_argument('--cutmix_prob', default=0.5, type=float)
+    parser.add_argument('--cutmix_prob', default=0.0, type=float)
     parser.add_argument('--pseudo_3d_slices', default=1, type=int)
 
     args = parser.parse_args()
@@ -159,7 +159,7 @@ def main():
     #     raise ValueError("force_separate_z must be None, True or False. Given: %s" % force_separate_z)
 
     plans_file, output_folder_name, dataset_directory, batch_dice, stage, \
-    trainer_class = get_default_configuration(network, task, network_trainer, plans_identifier)
+        trainer_class = get_default_configuration(network, task, network_trainer, plans_identifier)
 
     if trainer_class is None:
         raise RuntimeError("Could not find trainer class in nnunet.training.network_training")
@@ -178,7 +178,7 @@ def main():
                             deterministic=deterministic,
                             fp16=run_mixed_precision)
     if args.disable_saving:
-        trainer.save_final_checkpoint = False # whether or not to save the final checkpoint
+        trainer.save_final_checkpoint = False  # whether or not to save the final checkpoint
         trainer.save_best_checkpoint = False  # whether or not to save the best checkpoint according to
         # self.best_val_eval_criterion_MA
         trainer.save_intermediate_checkpoints = True  # whether or not to save checkpoint_latest. We need that in case
