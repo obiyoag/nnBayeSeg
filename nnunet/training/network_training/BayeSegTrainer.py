@@ -331,11 +331,12 @@ class BayeSeg(SegmentationNetwork):
 
 
 class BayeSeg_loss(DC_and_CE_loss):
-    def __init__(self, soft_dice_kwargs, ce_kwargs, aggregate="sum", square_dice=False, weight_ce=1, weight_dice=1,
+    def __init__(self, soft_dice_kwargs, ce_kwargs, total_epoch,  aggregate="sum", square_dice=False, weight_ce=1, weight_dice=1,
                  log_dice=False, ignore_label=None):
         super().__init__(soft_dice_kwargs, ce_kwargs, aggregate, square_dice, weight_ce, weight_dice, log_dice, ignore_label)
+        self.total_epoch = total_epoch
     
-    def forward(self, net_output, target):
+    def forward(self, net_output, target, epoch):
 
         pred = net_output['pred_masks']
 
@@ -371,7 +372,8 @@ class BayeSeg_loss(DC_and_CE_loss):
         loss_sigma_z = torch.sum(net_output['kl_sigma_z']) / N
         loss_Bayes = loss_y + loss_mu_m + loss_sigma_m + loss_mu_x + loss_sigma_x + loss_mu_z + loss_sigma_z
 
-        result += 100 * loss_Bayes
+        # result += 100 * loss_Bayes
+        result += 100 * (1 - math.cos(math.pi * epoch / self.total_epoch)) / 2
 
         return result
 
@@ -439,7 +441,7 @@ class BayeSegTrainer(nnUNetTrainer):
         self.process_plans(self.plans)
 
         # also initialize the loss of BayeSeg here
-        self.loss = BayeSeg_loss({'batch_dice': self.batch_dice, 'smooth': 1e-5, 'do_bg': False}, {})
+        self.loss = BayeSeg_loss({'batch_dice': self.batch_dice, 'smooth': 1e-5, 'do_bg': False}, {}, self.max_num_epochs)
         self.batch_size = self.args.batch_size
 
         self.setup_DA_params()
@@ -502,7 +504,7 @@ class BayeSegTrainer(nnUNetTrainer):
             with autocast():
                 output = self.network(data)
                 del data
-                l = self.loss(output, target)
+                l = self.loss(output, target, self.epoch)
 
             if do_backprop:
                 self.amp_grad_scaler.scale(l).backward()
@@ -513,7 +515,7 @@ class BayeSegTrainer(nnUNetTrainer):
         else:
             output = self.network(data)
             del data
-            l = self.loss(output, target)
+            l = self.loss(output, target, self.epoch)
 
             if do_backprop:
                 l.backward()
