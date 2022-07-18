@@ -8,7 +8,7 @@ from nnunet.network_architecture.neural_network import SegmentationNetwork
 from nnunet.network_architecture.initialization import InitWeights_He
 from nnunet.training.loss_functions.dice_loss import DC_and_CE_loss
 from batchgenerators.utilities.file_and_folder_operations import *
-from nnunet.training.dataloading.dataset_loading import unpack_dataset, DataLoader2D
+from nnunet.training.dataloading.dataset_loading import unpack_dataset, DataLoader2D, load_dataset
 from nnunet.utilities.tensor_utilities import sum_tensor
 import torch.nn.functional as F
 import math
@@ -16,7 +16,7 @@ from torch.nn import init as init
 from torch.nn.modules.batchnorm import _BatchNorm
 from torch.cuda.amp import autocast
 from nnunet.utilities.to_torch import maybe_to_torch, to_cuda
-from nnunet.training.data_augmentation.default_data_augmentation import default_2D_augmentation_params, get_patch_size
+from nnunet.training.data_augmentation.default_data_augmentation import default_2D_augmentation_params, get_default_augmentation, get_patch_size
 from nnunet.training.data_augmentation.data_augmentation_moreDA import get_moreDA_augmentation
 import numpy as np
 
@@ -479,6 +479,24 @@ class BayeSegTrainer(nnUNetTrainer):
                                      oversample_foreground_percent=self.oversample_foreground_percent, pad_mode="constant",
                                      pad_sides=self.pad_all_sides, memmap_mode='r', pseudo_3d_slices=self.args.pseudo_3d_slices)
         return dl_tr, dl_val
+    
+    def get_aux_generator(self):
+
+        aux_base_folder = "/home/gaoyibo/Datasets/nnUNet_datasets/nnUNet_preprocessed/ACDC"
+        self.folder_with_ACDC = join(aux_base_folder, "nnUNetData_plans_v2.1_2D_stage0")
+        plans_file = join(aux_base_folder, "nnUNetPlansv2.1_plans_2D.pkl")
+
+        aux_dataset = load_dataset(self.folder_with_ACDC)
+        plans = load_pickle(plans_file)['plans_per_stage'][0]
+        basic_generator_patch_size = get_patch_size(self.patch_size, self.data_aug_params['rotation_x'],
+                                                    self.data_aug_params['rotation_y'],
+                                                    self.data_aug_params['rotation_z'],
+                                                    self.data_aug_params['scale_range'])
+
+        dl_aux = DataLoader_pseudo3D(aux_dataset, basic_generator_patch_size, self.patch_size, self.batch_size, pad_mode="constant", 
+                                     pad_sides=self.pad_all_sides, memmap_mode='r', pseudo_3d_slices=self.args.pseudo_3d_slices)
+        gen_aux, _ = get_default_augmentation(dl_aux, None, self.patch_size, self.data_aug_params)
+        return gen_aux
 
     def initialize_network(self):
         unet = self.initialize_unet()
@@ -538,9 +556,11 @@ class BayeSegTrainer(nnUNetTrainer):
 
         if training:
             self.dl_tr, self.dl_val = self.get_basic_generators()
+            self.dl_aux = self.get_aux_generator()
             if self.unpack_data:
                 self.print_to_log_file("unpacking dataset")
                 unpack_dataset(self.folder_with_preprocessed_data)
+                unpack_dataset(self.folder_with_ACDC)
                 self.print_to_log_file("done")
             else:
                 self.print_to_log_file(
@@ -578,12 +598,13 @@ class BayeSegTrainer(nnUNetTrainer):
             target = to_cuda(target)
         
         r = np.random.rand(1)
-        if r < self.cutmix_prob:
-            lam = np.random.rand(1)
-            rand_index = torch.randperm(data.size()[0]).cuda()
-            bbx1, bby1, bbx2, bby2 = rand_bbox(data.size(), lam)
-            data[:, :, bbx1:bbx2, bby1:bby2] = data[rand_index, :, bbx1:bbx2, bby1:bby2]
-            target[:, :, bbx1:bbx2, bby1:bby2] = target[rand_index, :, bbx1:bbx2, bby1:bby2]
+        if r < self.cutmix_prob and self.network.training:
+            aux_image = next(self.dl_aux)['data']
+            aux_image = maybe_to_torch(aux_image)
+            aux_image = to_cuda(aux_image)
+            bbx1, bby1, bbx2, bby2 = rand_bbox(data.size(), self.args.cut_ratio)
+            aux_image[:, :, bbx1:bbx2, bby1:bby2] = data[:, :, bbx1:bbx2, bby1:bby2]
+            data = aux_image
 
         self.optimizer.zero_grad()
 
@@ -643,7 +664,8 @@ class BayeSegTrainer(nnUNetTrainer):
             self.online_eval_fn.append(list(fn_hard))
 
 
-def rand_bbox(size, lam):
+def rand_bbox(size, cut_ratio):
+    lam = np.random.uniform(cut_ratio[0], cut_ratio[1])
     W = size[2]
     H = size[3]
     cut_rat = np.sqrt(1. - lam)
@@ -651,8 +673,12 @@ def rand_bbox(size, lam):
     cut_h = np.int(H * cut_rat)
 
     # uniform
-    cx = np.random.randint(W)
-    cy = np.random.randint(H)
+    # cx = np.random.randint(W)
+    # cy = np.random.randint(H)
+
+    # center
+    cx = W // 2
+    cy = H // 2
 
     bbx1 = np.clip(cx - cut_w // 2, 0, W)
     bby1 = np.clip(cy - cut_h // 2, 0, H)

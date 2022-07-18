@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 
 gpu_id=1
-task_id=511
-weight_bayes=0.0
-task_name="Task${task_id}_weight${weight_bayes}_on2"
-train_data_name="Task501_FeTA_2"
-test_data_name="Task500_FeTA_1"
+task_id=522
+lbd=0.5
+hbd=1.0
+task_name="Task${task_id}_range_${lbd}_${hbd}_weight50.0_2d_prob1.0"
+train_data_name="Task500_FeTA_1"
+test_data_name="Task501_FeTA_2"
 
 data_base="/home/gaoyibo/Datasets/nnUNet_datasets/nnUNet_raw_data_base/nnUNet_raw_data"
 
 mkdir -p "${data_base}/${task_name}/predictions"
 cp -r "${nnUNet_preprocessed}/${train_data_name}" "${nnUNet_preprocessed}/${task_name}"
 
-CUDA_VISIBLE_DEVICES=${gpu_id} python -u ../new_run_training.py 2d BayeSegTrainer ${task_name} 0 --npz --batch_size 24 --cutmix_prob 0.5 \
-    --pseudo_3d_slices 3 --weight_bayes ${weight_bayes} >"${task_name}.txt"
+CUDA_VISIBLE_DEVICES=${gpu_id} python -u ../new_run_training.py 2d BayeSegTrainer ${task_name} 0 --npz --batch_size 24 --cutmix_prob 1.0 \
+    --pseudo_3d_slices 1 --weight_bayes 50.0 --cut_ratio ${lbd} ${hbd} >"${task_name}.txt"
 
 image_folder="${data_base}/${test_data_name}/imagesTr"
 label_folder="${data_base}/${test_data_name}/labelsTr"
