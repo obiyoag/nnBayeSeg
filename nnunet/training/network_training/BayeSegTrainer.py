@@ -16,7 +16,8 @@ from torch.nn import init as init
 from torch.nn.modules.batchnorm import _BatchNorm
 from torch.cuda.amp import autocast
 from nnunet.utilities.to_torch import maybe_to_torch, to_cuda
-from nnunet.training.data_augmentation.default_data_augmentation import get_default_augmentation
+from nnunet.training.data_augmentation.default_data_augmentation import default_2D_augmentation_params, get_patch_size
+from nnunet.training.data_augmentation.data_augmentation_moreDA import get_moreDA_augmentation
 import numpy as np
 
 
@@ -282,9 +283,7 @@ class BayeSeg(SegmentationNetwork):
               }
         return out
 
-    def _internal_maybe_mirror_and_pred_2D(self, x, mirror_axes,
-                                           do_mirroring=True,
-                                           mult=None):
+    def _internal_maybe_mirror_and_pred_2D(self, x, mirror_axes, do_mirroring=True, mult=None):
 
         assert len(x.shape) == 4, 'x must be (b, c, x, y)'
 
@@ -329,12 +328,57 @@ class BayeSeg(SegmentationNetwork):
 
         return result_torch
 
+    def _internal_predict_3D_2Dconv_tiled(self, case_image, patch_size, do_mirroring, mirror_axes=(0, 1), step_size=0.5, regions_class_order=None,
+                                          use_gaussian=False, pad_border_mode="edge", pad_kwargs=None, all_in_gpu=False, verbose=True):
+        if all_in_gpu:
+            raise NotImplementedError
+
+        case_shp = case_image.shape
+        assert len(case_shp) == 4, "data must be c, x, y, z"
+
+        predicted_segmentation = []
+        softmax_pred = []
+
+        for s in range(case_shp[1]):
+            if self.args.pseudo_3d_slices == 1:
+                x = case_image[:, s]
+            else:
+                mn = s - (self.args.pseudo_3d_slices - 1) // 2
+                mx = s + (self.args.pseudo_3d_slices - 1) // 2 + 1
+                valid_mn = max(mn, 0)
+                valid_mx = min(mx, case_shp[1])
+                x = case_image[:, valid_mn:valid_mx]
+                need_to_pad_below = valid_mn - mn
+                need_to_pad_above = mx - valid_mx
+                if need_to_pad_below > 0:
+                    shp_for_pad = np.array(x.shape)
+                    shp_for_pad[1] = need_to_pad_below
+                    x = np.concatenate((np.zeros(shp_for_pad), x), 1)
+                if need_to_pad_above > 0:
+                    shp_for_pad = np.array(x.shape)
+                    shp_for_pad[1] = need_to_pad_above
+                    x = np.concatenate((x, np.zeros(shp_for_pad)), 1)
+                x = x.reshape((-1, case_shp[-2], case_shp[-1]))
+            
+            pred_seg, softmax_pres = self._internal_predict_2D_2Dconv_tiled(
+                x, step_size, do_mirroring, mirror_axes, patch_size, regions_class_order, use_gaussian,
+                pad_border_mode, pad_kwargs, all_in_gpu, verbose)
+
+            predicted_segmentation.append(pred_seg[None])
+            softmax_pred.append(softmax_pres[None])
+
+        predicted_segmentation = np.vstack(predicted_segmentation)
+        softmax_pred = np.vstack(softmax_pred).transpose((1, 0, 2, 3))
+
+        return predicted_segmentation, softmax_pred
+
 
 class BayeSeg_loss(DC_and_CE_loss):
-    def __init__(self, soft_dice_kwargs, ce_kwargs, total_epoch,  aggregate="sum", square_dice=False, weight_ce=1, weight_dice=1,
+    def __init__(self, soft_dice_kwargs, ce_kwargs, total_epoch, weight_bayes, aggregate="sum", square_dice=False, weight_ce=1, weight_dice=1,
                  log_dice=False, ignore_label=None):
         super().__init__(soft_dice_kwargs, ce_kwargs, aggregate, square_dice, weight_ce, weight_dice, log_dice, ignore_label)
         self.total_epoch = total_epoch
+        self.weight_bayes = weight_bayes
     
     def forward(self, net_output, target, epoch):
 
@@ -372,8 +416,19 @@ class BayeSeg_loss(DC_and_CE_loss):
         loss_sigma_z = torch.sum(net_output['kl_sigma_z']) / N
         loss_Bayes = loss_y + loss_mu_m + loss_sigma_m + loss_mu_x + loss_sigma_x + loss_mu_z + loss_sigma_z
 
-        # result += 100 * loss_Bayes
-        result += 100 * (1 - math.cos(math.pi * epoch / self.total_epoch)) / 2
+        print('Bayes loss: ', loss_Bayes.item())
+        if loss_Bayes.item() > 10000:
+            loss_Bayes = 0.00001 * loss_Bayes
+        elif loss_Bayes.item() > 1000 and loss_Bayes.item() < 10000:
+            loss_Bayes = 0.0001 * loss_Bayes
+        elif loss_Bayes.item() > 100 and loss_Bayes.item() < 1000:
+            loss_Bayes = 0.001 * loss_Bayes
+        elif loss_Bayes.item() > 10 and loss_Bayes.item() < 100:
+            loss_Bayes = 0.01 * loss_Bayes
+            
+        # result += 100 * loss_Bayes * (1 - math.cos(math.pi * epoch / self.total_epoch)) / 2
+
+        result += self.weight_bayes * loss_Bayes
 
         return result
 
@@ -431,6 +486,34 @@ class BayeSegTrainer(nnUNetTrainer):
         self.network = BayeSeg(self.args, unet)
         self.network.cuda()
 
+    def setup_DA_params(self):
+
+        self.do_dummy_2D_aug = False
+        if max(self.patch_size) / min(self.patch_size) > 1.5:
+            default_2D_augmentation_params['rotation_x'] = (-15. / 360 * 2. * np.pi, 15. / 360 * 2. * np.pi)
+        self.data_aug_params = default_2D_augmentation_params
+        self.data_aug_params["mask_was_used_for_normalization"] = self.use_mask_for_norm
+
+        if self.do_dummy_2D_aug:
+            self.basic_generator_patch_size = get_patch_size(self.patch_size[1:],
+                                                             self.data_aug_params['rotation_x'],
+                                                             self.data_aug_params['rotation_y'],
+                                                             self.data_aug_params['rotation_z'],
+                                                             self.data_aug_params['scale_range'])
+            self.basic_generator_patch_size = np.array([self.patch_size[0]] + list(self.basic_generator_patch_size))
+        else:
+            self.basic_generator_patch_size = get_patch_size(self.patch_size, self.data_aug_params['rotation_x'],
+                                                             self.data_aug_params['rotation_y'],
+                                                             self.data_aug_params['rotation_z'],
+                                                             self.data_aug_params['scale_range'])
+
+        self.data_aug_params["scale_range"] = (0.7, 1.4)
+        self.data_aug_params["do_elastic"] = False
+        self.data_aug_params['selected_seg_channels'] = [0]
+        self.data_aug_params['patch_size_for_spatialtransform'] = self.patch_size
+
+        self.data_aug_params["num_cached_per_thread"] = 2
+
     def initialize(self, training=True, force_load_plans=False):
 
         maybe_mkdir_p(self.output_folder)
@@ -441,7 +524,7 @@ class BayeSegTrainer(nnUNetTrainer):
         self.process_plans(self.plans)
 
         # also initialize the loss of BayeSeg here
-        self.loss = BayeSeg_loss({'batch_dice': self.batch_dice, 'smooth': 1e-5, 'do_bg': False}, {}, self.max_num_epochs)
+        self.loss = BayeSeg_loss({'batch_dice': self.batch_dice, 'smooth': 1e-5, 'do_bg': False}, {}, self.max_num_epochs, self.args.weight_bayes)
         self.batch_size = self.args.batch_size
 
         self.setup_DA_params()
@@ -463,10 +546,14 @@ class BayeSegTrainer(nnUNetTrainer):
                 self.print_to_log_file(
                     "INFO: Not unpacking data! Training may be slow due to that. Pray you are not using 2d or you "
                     "will wait all winter for your model to finish!")
-            self.tr_gen, self.val_gen = get_default_augmentation(self.dl_tr, self.dl_val,
-                                                                 self.data_aug_params[
-                                                                     'patch_size_for_spatialtransform'],
-                                                                 self.data_aug_params)
+            self.tr_gen, self.val_gen = get_moreDA_augmentation(
+                self.dl_tr, self.dl_val,
+                self.data_aug_params['patch_size_for_spatialtransform'],
+                self.data_aug_params,
+                deep_supervision_scales=None,
+                pin_memory=True,
+                use_nondetMultiThreadedAugmenter=False
+            )
             self.print_to_log_file("TRAINING KEYS:\n %s" % (str(self.dataset_tr.keys())),
                                    also_print_to_console=False)
             self.print_to_log_file("VALIDATION KEYS:\n %s" % (str(self.dataset_val.keys())),
@@ -505,6 +592,7 @@ class BayeSegTrainer(nnUNetTrainer):
                 output = self.network(data)
                 del data
                 l = self.loss(output, target, self.epoch)
+                print(l.item())
 
             if do_backprop:
                 self.amp_grad_scaler.scale(l).backward()

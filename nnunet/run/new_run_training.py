@@ -114,6 +114,7 @@ def main():
 
     parser.add_argument('--cutmix_prob', default=0.0, type=float)
     parser.add_argument('--pseudo_3d_slices', default=1, type=int)
+    parser.add_argument('--weight_bayes', default=100.0, type=float)
 
     args = parser.parse_args()
 
