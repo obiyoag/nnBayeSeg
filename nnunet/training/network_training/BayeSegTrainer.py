@@ -19,6 +19,7 @@ from nnunet.utilities.to_torch import maybe_to_torch, to_cuda
 from nnunet.training.data_augmentation.default_data_augmentation import default_2D_augmentation_params, get_default_augmentation, get_patch_size
 from nnunet.training.data_augmentation.data_augmentation_moreDA import get_moreDA_augmentation
 import numpy as np
+import cv2
 
 
 @torch.no_grad()
@@ -178,6 +179,7 @@ class BayeSeg(SegmentationNetwork):
         self.res_noise = ResNet(num_in_ch=self.args.pseudo_3d_slices, num_out_ch = 2, num_block=6, bn=True)  # 推断噪声的话，也许加BN的效果会更好一些？
         # pred mu and log var unit for seg_masks: B x K x W x H
         self.unet = unet
+        self.input_shape_must_be_divisible_by = self.unet.input_shape_must_be_divisible_by
         
         # postprecess
         self.softmax = nn.Softmax(dim=1)
@@ -225,7 +227,7 @@ class BayeSeg(SegmentationNetwork):
         if self.args.pseudo_3d_slices != 1:
             samples = samples[:, self.args.pseudo_3d_slices//2].unsqueeze(1)
         residual = samples - (x + m)
-        mu_rho_hat = (2*self.args.gamma_rho + 1) / (residual*residual + 2*self.args.phi_rho)
+        mu_rho_hat = (2*self.args.gamma_rho + 1) / (torch.clip(residual, -0.01, 0.01) * torch.clip(residual, -0.01, 0.01) + 2*self.args.phi_rho)
         normalization = torch.sum(mu_rho_hat).detach()
         n, _ = sample_normal_jit(m, torch.log(1 / mu_rho_hat))
         
@@ -281,8 +283,44 @@ class BayeSeg(SegmentationNetwork):
                'upsilon':mu_upsilon_hat*mu_z,
                'visualize':visualize,
               }
-        return out
+        
+        self.save_image(mu_omega_hat, 'contour')
+        self.save_image(mu_upsilon_hat, 'line')
+        self.save_image(samples, 'input')
 
+        return out
+    
+    def save_image(self, image, tag):
+        if type(image) == np.ndarray:
+            image = image[0]
+            image = (image - image.min()) / (image.max() - image.min() + 1e-6)
+            visual = 255 * image
+        else:
+            if image.requires_grad:
+                image = image.detach().cpu().numpy()
+            else:
+                image = image.cpu().numpy()
+
+            if image.shape[1] != 1:
+                ncol = 2
+                nrow = image.shape[1] // ncol
+                height, width = image.shape[2:]
+                visual = np.zeros((nrow * height, ncol * width))
+                for i in range(nrow):
+                    for j in range(ncol):
+                        ub, db = i * height, (i+1) * height
+                        lb, rb = j * width, (j+1) * width
+                        part_image = image[0, ncol*i+j, ...]
+                        part_image = (part_image - part_image.min()) / (part_image.max() - part_image.min() + 1e-6)
+                        visual[ub: db, lb: rb] = 255 * part_image
+            else:
+                image = image[0, 0, ...]
+                image = (image - image.min()) / (image.max() - image.min() + 1e-6)
+                visual = 255 * image
+
+        cv2.imwrite(tag + '.png', visual)
+        print('yes')
+    
     def _internal_maybe_mirror_and_pred_2D(self, x, mirror_axes, do_mirroring=True, mult=None):
 
         assert len(x.shape) == 4, 'x must be (b, c, x, y)'
@@ -372,7 +410,6 @@ class BayeSeg(SegmentationNetwork):
 
         return predicted_segmentation, softmax_pred
 
-
 class BayeSeg_loss(DC_and_CE_loss):
     def __init__(self, soft_dice_kwargs, ce_kwargs, total_epoch, weight_bayes, aggregate="sum", square_dice=False, weight_ce=1, weight_dice=1,
                  log_dice=False, ignore_label=None):
@@ -417,14 +454,14 @@ class BayeSeg_loss(DC_and_CE_loss):
         loss_Bayes = loss_y + loss_mu_m + loss_sigma_m + loss_mu_x + loss_sigma_x + loss_mu_z + loss_sigma_z
 
         print('Bayes loss: ', loss_Bayes.item())
-        if loss_Bayes.item() > 10000:
-            loss_Bayes = 0.00001 * loss_Bayes
-        elif loss_Bayes.item() > 1000 and loss_Bayes.item() < 10000:
-            loss_Bayes = 0.0001 * loss_Bayes
-        elif loss_Bayes.item() > 100 and loss_Bayes.item() < 1000:
-            loss_Bayes = 0.001 * loss_Bayes
-        elif loss_Bayes.item() > 10 and loss_Bayes.item() < 100:
-            loss_Bayes = 0.01 * loss_Bayes
+        # if loss_Bayes.item() > 10000:
+        #    loss_Bayes = 0.00001 * loss_Bayes
+        # elif loss_Bayes.item() > 1000 and loss_Bayes.item() < 10000:
+        #    loss_Bayes = 0.0001 * loss_Bayes
+        # elif loss_Bayes.item() > 100 and loss_Bayes.item() < 1000:
+        #    loss_Bayes = 0.001 * loss_Bayes
+        # elif loss_Bayes.item() > 10 and loss_Bayes.item() < 100:
+        #    loss_Bayes = 0.01 * loss_Bayes
             
         # result += 100 * loss_Bayes * (1 - math.cos(math.pi * epoch / self.total_epoch)) / 2
 
@@ -484,16 +521,12 @@ class BayeSegTrainer(nnUNetTrainer):
 
         aux_base_folder = "/home/gaoyibo/Datasets/nnUNet_datasets/nnUNet_preprocessed/ACDC"
         self.folder_with_ACDC = join(aux_base_folder, "nnUNetData_plans_v2.1_2D_stage0")
-        plans_file = join(aux_base_folder, "nnUNetPlansv2.1_plans_2D.pkl")
-
         aux_dataset = load_dataset(self.folder_with_ACDC)
-        plans = load_pickle(plans_file)['plans_per_stage'][0]
         basic_generator_patch_size = get_patch_size(self.patch_size, self.data_aug_params['rotation_x'],
                                                     self.data_aug_params['rotation_y'],
                                                     self.data_aug_params['rotation_z'],
                                                     self.data_aug_params['scale_range'])
-
-        dl_aux = DataLoader_pseudo3D(aux_dataset, basic_generator_patch_size, self.patch_size, self.batch_size, pad_mode="constant", 
+        dl_aux = DataLoader_pseudo3D(aux_dataset, basic_generator_patch_size, self.patch_size, self.batch_size, pad_mode="constant",
                                      pad_sides=self.pad_all_sides, memmap_mode='r', pseudo_3d_slices=self.args.pseudo_3d_slices)
         gen_aux, _ = get_default_augmentation(dl_aux, None, self.patch_size, self.data_aug_params)
         return gen_aux

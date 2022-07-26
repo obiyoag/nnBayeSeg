@@ -3,21 +3,30 @@
     // Hover to view descriptions of existing attributes.
     // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
+    // "configurations": [
+    //     {
+    //         "name": "Python: Current File",
+    //         "type": "python",
+    //         "request": "launch",
+    //         "program": "/home/gaoyibo/nnUNet/nnunet/run/new_run_training.py",
+    //         "console": "integratedTerminal",
+    //         "justMyCode": true,
+    //         "env": {"CUDA_VISIBLE_DEVICES":"0"},
+    //         "args": ["2d", "BayeSegTrainer", "Task500_FeTA_1", "0", "--npz", "--batch_size", "24", "--pseudo_3d_slices", "1", "--cutmix_prob", "0.5"]
+    //     }
+    // ]
     "configurations": [
         {
             "name": "Python: Current File",
             "type": "python",
             "request": "launch",
-            "program": "/home/gaoyibo/nnUNet/nnunet/run/new_run_training.py",
+            "program": "/home/gaoyibo/nnUNet/nnunet/inference/predict_simple.py",
             "console": "integratedTerminal",
             "justMyCode": true,
             "env": {"CUDA_VISIBLE_DEVICES":"0"},
-            "args": ["2d", "BayeSegTrainer", "Task500_FeTA_1", "0", "--npz", "--batch_size", "24", "--pseudo_3d_slices", "3", "--cutmix_prob", "0.5"]
-            // "args": ["--task_name", "Task600_FeTA_cutmix", "--institution", "both"]
-            // "args": ["2d", "BayeSegTrainer", "Task500_FeTA", "0", "--npz", "-val", "--valbest"]
-            // "args": ["-i", "/home/gaoyibo/Datasets/nnUNet_datasets/nnUNet_raw_data_base/nnUNet_raw_data/Task500_FeTA2/imagesTr", 
-            //          "-o", "/home/gaoyibo/Datasets/nnUNet_datasets/nnUNet_raw_data_base/nnUNet_raw_data/Task500_FeTA2/predictions", 
-            //          "-t", "Task500_FeTA", "-tr", "BayeSegTrainer", "-m", "2d", "-f", "0"]
+            "args": ["-i", "/home/gaoyibo/Datasets/nnUNet_datasets/nnUNet_raw_data_base/nnUNet_raw_data/Task501_FeTA_2/imagesTr", 
+                     "-o", "/home/gaoyibo/Datasets/nnUNet_datasets/nnUNet_raw_data_base/nnUNet_raw_data/Task501_FeTA_2/predictions", 
+                     "-t", "Task522_range_0.5_1.0_weight50.0_2d_prob1.0", "-tr", "BayeSegTrainer", "-m", "2d", "-f", "0"]
         }
     ]
 }
