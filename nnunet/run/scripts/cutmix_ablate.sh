@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 
-gpu_id=2
-task_id=525
+gpu_id=0
+task_id=503
 lbd=0.6
 hbd=0.9
 weight=100.0
-task_name="Task${task_id}_range_${lbd}_${hbd}_weight${weight}_2d"
+task_name="Task${task_id}_range_${lbd}_${hbd}_weight${weight}_2d_ddo"
 train_data_name="Task500_FeTA_1"
 test_data_name="Task501_FeTA_2"
 

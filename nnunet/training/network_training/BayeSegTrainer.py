@@ -187,8 +187,12 @@ class BayeSeg(SegmentationNetwork):
         # TODO: modify Dx & Dz
         Dx = torch.zeros([1,1,3,3],dtype=torch.float)
         Dx[:,:,1,1] = 1
-        Dx[:,:,1,0] = Dx[:,:,1,2] = Dx[:,:,0,1] = Dx[:,:,2,1] = -1/4
+        Dx[:,:,1,2] = -1
         self.Dx = nn.Parameter(data=Dx, requires_grad=False)
+        Dy = torch.zeros([1,1,3,3],dtype=torch.float)
+        Dy[:,:,1,1] = 1
+        Dy[:,:,2,1] = -1
+        self.Dy = nn.Parameter(data=Dy, requires_grad=False)
         
     def generate_m(self, samples):
         # m : mean of noise
@@ -226,39 +230,48 @@ class BayeSeg(SegmentationNetwork):
         # noise std rho
         if self.args.pseudo_3d_slices != 1:
             samples = samples[:, self.args.pseudo_3d_slices//2].unsqueeze(1)
-        residual = samples - (x + m)
+
+        if self.args.clip_x:
+            residual = samples - (torch.clip(x, -0.1, 0.1) + m)
+        else:
+            residual = samples - (x + m)
+
         mu_rho_hat = (2*self.args.gamma_rho + 1) / (torch.clip(residual, -0.01, 0.01) * torch.clip(residual, -0.01, 0.01) + 2*self.args.phi_rho)
         normalization = torch.sum(mu_rho_hat).detach()
         n, _ = sample_normal_jit(m, torch.log(1 / mu_rho_hat))
         
         # Image line upsilon
         alpha_upsilon_hat = 2*self.args.gamma_upsilon + K
-        difference_x = F.conv2d(mu_x, self.Dx, padding=1)
-        beta_upsilon_hat = torch.sum(mu_z*(difference_x*difference_x + 2*torch.exp(log_var_x)),
+        difference_x_x = F.conv2d(mu_x, self.Dx, padding=1)
+        difference_x_y = F.conv2d(mu_x, self.Dy, padding=1)
+        difference_x_2 = difference_x_x**2 + difference_x_y**2
+        beta_upsilon_hat = torch.sum(mu_z*(difference_x_2 + 4*torch.exp(log_var_x)),
                                      dim = 1, keepdim = True) + 2*self.args.phi_upsilon  # B x 1 x W x H
         mu_upsilon_hat = alpha_upsilon_hat / beta_upsilon_hat
        
         # Seg boundary omega
-        difference_z = F.conv2d(mu_z, self.Dx.expand(K,1,3,3), padding=1, groups=K)  # B x K x W x H
+        difference_z_x = F.conv2d(mu_z, self.Dx.expand(K,1,3,3), padding=1, groups=K)  # B x K x W x H
+        difference_z_y = F.conv2d(mu_z, self.Dy.expand(K,1,3,3), padding=1, groups=K)  # B x K x W x H
+        difference_z_2 = difference_z_x**2 + difference_z_y**2
         alpha_omega_hat = 2*self.args.gamma_omega + 1
         pseudo_pi = torch.mean(mu_z, dim=(2,3), keepdim=True)
-        beta_omega_hat = pseudo_pi*(difference_z*difference_z + 2*torch.exp(log_var_z)) + 2*self.args.phi_omega
+        beta_omega_hat = pseudo_pi*(difference_z_2 + 4*torch.exp(log_var_z)) + 2*self.args.phi_omega
         mu_omega_hat = alpha_omega_hat / beta_omega_hat
  
         # Seg category probability pi
         _, _, W, H = samples.shape
         alpha_pi_hat = self.args.alpha_pi + W*H/2
-        beta_pi_hat = torch.sum(mu_omega_hat*(difference_z*difference_z + 2*torch.exp(log_var_z)), dim=(2,3), keepdim=True)/2 + self.args.beta_pi
+        beta_pi_hat = torch.sum(mu_omega_hat*(difference_z_2 + 4*torch.exp(log_var_z)), dim=(2,3), keepdim=True)/2 + self.args.beta_pi
         digamma_pi = torch.special.digamma(alpha_pi_hat + beta_pi_hat) - torch.special.digamma(beta_pi_hat)
         
         # compute loss-related
         kl_y = residual*mu_rho_hat.detach()*residual
 
-        kl_mu_z = torch.sum(digamma_pi.detach()*difference_z*mu_omega_hat.detach()*difference_z, dim=1)
-        kl_sigma_z = torch.sum(digamma_pi.detach()*(2*torch.exp(log_var_z)*mu_omega_hat.detach() - log_var_z), dim=1)
+        kl_mu_z = torch.sum(digamma_pi.detach()*difference_z_2*mu_omega_hat.detach(), dim=1)
+        kl_sigma_z = torch.sum(digamma_pi.detach()*(4*torch.exp(log_var_z)*mu_omega_hat.detach() - log_var_z), dim=1)
         
-        kl_mu_x = torch.sum(difference_x*difference_x*mu_upsilon_hat.detach()*mu_z.detach(), dim=1)
-        kl_sigma_x = torch.sum(2*torch.exp(log_var_x)*mu_upsilon_hat.detach()*mu_z.detach(), dim=1) - log_var_x
+        kl_mu_x = torch.sum(difference_x_2*mu_upsilon_hat.detach()*mu_z.detach(), dim=1)
+        kl_sigma_x = torch.sum(4*torch.exp(log_var_x)*mu_upsilon_hat.detach()*mu_z.detach(), dim=1) - log_var_x
         
         kl_mu_m = self.args.sigma_0*mu_m*mu_m
         kl_sigma_m = self.args.sigma_0*torch.exp(log_var_m) - log_var_m
@@ -284,9 +297,9 @@ class BayeSeg(SegmentationNetwork):
                'visualize':visualize,
               }
         
-        self.save_image(mu_omega_hat, 'contour')
-        self.save_image(mu_upsilon_hat, 'line')
-        self.save_image(samples, 'input')
+        # self.save_image(mu_omega_hat, 'contour')
+        # self.save_image(mu_upsilon_hat, 'line')
+        # self.save_image(samples, 'input')
 
         return out
     
