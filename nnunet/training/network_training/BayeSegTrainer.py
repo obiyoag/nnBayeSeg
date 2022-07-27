@@ -193,6 +193,8 @@ class BayeSeg(SegmentationNetwork):
         Dy[:,:,1,1] = 1
         Dy[:,:,2,1] = -1
         self.Dy = nn.Parameter(data=Dy, requires_grad=False)
+
+        self.iteration_num = 0
         
     def generate_m(self, samples):
         # m : mean of noise
@@ -217,8 +219,9 @@ class BayeSeg(SegmentationNetwork):
         log_var_z = torch.clamp(log_var_z, -20, 0)
         z, _ = sample_normal_jit(mu_z, log_var_z)
         return self.softmax(z), self.softmax(mu_z), log_var_z
-
+    
     def forward(self, samples: torch.Tensor):
+        self.iteration_num += 1
         x, mu_x, log_var_x = self.generate_x(samples)
         m, mu_m, log_var_m = self.generate_m(samples)
         z, mu_z, log_var_z = self.generate_z(x)
@@ -231,8 +234,8 @@ class BayeSeg(SegmentationNetwork):
         if self.args.pseudo_3d_slices != 1:
             samples = samples[:, self.args.pseudo_3d_slices//2].unsqueeze(1)
 
-        if self.args.clip_x:
-            residual = samples - (torch.clip(x, -0.1, 0.1) + m)
+        if self.iteration_num < 250:
+            residual = samples - m
         else:
             residual = samples - (x + m)
 
@@ -297,7 +300,8 @@ class BayeSeg(SegmentationNetwork):
                'visualize':visualize,
               }
         
-        # self.save_image(mu_omega_hat, 'contour')
+        # self.save_image(x, 'contour')
+        # self.save_image(m, 'basis')
         # self.save_image(mu_upsilon_hat, 'line')
         # self.save_image(samples, 'input')
 
@@ -313,6 +317,9 @@ class BayeSeg(SegmentationNetwork):
                 image = image.detach().cpu().numpy()
             else:
                 image = image.cpu().numpy()
+            
+            if image.dtype == np.float16:
+                image = image.astype(np.float32)
 
             if image.shape[1] != 1:
                 ncol = 2
@@ -332,7 +339,6 @@ class BayeSeg(SegmentationNetwork):
                 visual = 255 * image
 
         cv2.imwrite(tag + '.png', visual)
-        print('yes')
     
     def _internal_maybe_mirror_and_pred_2D(self, x, mirror_axes, do_mirroring=True, mult=None):
 
@@ -466,7 +472,7 @@ class BayeSeg_loss(DC_and_CE_loss):
         loss_sigma_z = torch.sum(net_output['kl_sigma_z']) / N
         loss_Bayes = loss_y + loss_mu_m + loss_sigma_m + loss_mu_x + loss_sigma_x + loss_mu_z + loss_sigma_z
 
-        print('Bayes loss: ', loss_Bayes.item())
+        # print('Bayes loss: ', loss_Bayes.item())
         # if loss_Bayes.item() > 10000:
         #    loss_Bayes = 0.00001 * loss_Bayes
         # elif loss_Bayes.item() > 1000 and loss_Bayes.item() < 10000:
@@ -659,7 +665,6 @@ class BayeSegTrainer(nnUNetTrainer):
                 output = self.network(data)
                 del data
                 l = self.loss(output, target, self.epoch)
-                print(l.item())
 
             if do_backprop:
                 self.amp_grad_scaler.scale(l).backward()
