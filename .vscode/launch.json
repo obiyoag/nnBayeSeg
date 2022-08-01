@@ -12,7 +12,7 @@
             "console": "integratedTerminal",
             "justMyCode": true,
             "env": {"CUDA_VISIBLE_DEVICES":"0"},
-            "args": ["2d", "BayeSegTrainer", "Task501_FeTA_2", "0", "--npz", "--cutmix_prob", "1.0"]
+            "args": ["2d", "BayeSegTrainer", "Task502_FeTA_both", "0", "--npz", "--cutmix_prob", "1.0"]
         }
     ]
     // "configurations": [
