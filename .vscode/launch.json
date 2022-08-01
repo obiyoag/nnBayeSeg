@@ -12,8 +12,7 @@
             "console": "integratedTerminal",
             "justMyCode": true,
             "env": {"CUDA_VISIBLE_DEVICES":"0"},
-            "args": ["2d", "BayeSegTrainer", "Task503_range_0.6_0.9_weight100.0_2d_ddo", "0", "--npz", "--batch_size", "24", "--pseudo_3d_slices", "1", "--cutmix_prob", "0.5",
-                     "--weight_bayes", "50.0", "--cut_ratio", "0.6", "0.9"]
+            "args": ["2d", "BayeSegTrainer", "Task501_FeTA_2", "0", "--npz", "--cutmix_prob", "1.0"]
         }
     ]
     // "configurations": [

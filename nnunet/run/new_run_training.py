@@ -109,13 +109,13 @@ def main():
     parser.add_argument('--beta_pi', default = 2, type=float)
 
     parser.add_argument('--lr', default=0.0001, type=float)
-    parser.add_argument('--batch_size', default=16, type=int)
+    parser.add_argument('--batch_size', default=24, type=int)
     parser.add_argument('--epochs', default=1000, type=int)
 
-    parser.add_argument('--cutmix_prob', default=0.0, type=float)
+    parser.add_argument('--cutmix_prob', default=0.5, type=float)
     parser.add_argument('--pseudo_3d_slices', default=1, type=int)
-    parser.add_argument('--weight_bayes', default=100.0, type=float)
-    parser.add_argument('--cut_ratio', default=[0.5, 0.8], type=float, nargs='+')
+    parser.add_argument('--weight_bayes', default=50.0, type=float)
+    parser.add_argument('--cut_ratio', default=[0.6, 0.9], type=float, nargs='+')
     parser.add_argument("--clip_x", default=False, action="store_true")
 
     args = parser.parse_args()

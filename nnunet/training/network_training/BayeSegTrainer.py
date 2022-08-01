@@ -8,7 +8,7 @@ from nnunet.network_architecture.neural_network import SegmentationNetwork
 from nnunet.network_architecture.initialization import InitWeights_He
 from nnunet.training.loss_functions.dice_loss import DC_and_CE_loss
 from batchgenerators.utilities.file_and_folder_operations import *
-from nnunet.training.dataloading.dataset_loading import unpack_dataset, DataLoader2D, load_dataset
+from nnunet.training.dataloading.dataset_loading import unpack_dataset, DataLoader2D
 from nnunet.utilities.tensor_utilities import sum_tensor
 import torch.nn.functional as F
 import math
@@ -16,7 +16,7 @@ from torch.nn import init as init
 from torch.nn.modules.batchnorm import _BatchNorm
 from torch.cuda.amp import autocast
 from nnunet.utilities.to_torch import maybe_to_torch, to_cuda
-from nnunet.training.data_augmentation.default_data_augmentation import default_2D_augmentation_params, get_default_augmentation, get_patch_size
+from nnunet.training.data_augmentation.default_data_augmentation import default_2D_augmentation_params, get_patch_size
 from nnunet.training.data_augmentation.data_augmentation_moreDA import get_moreDA_augmentation
 import numpy as np
 import cv2
@@ -187,12 +187,8 @@ class BayeSeg(SegmentationNetwork):
         # TODO: modify Dx & Dz
         Dx = torch.zeros([1,1,3,3],dtype=torch.float)
         Dx[:,:,1,1] = 1
-        Dx[:,:,1,2] = -1
+        Dx[:,:,1,0] = Dx[:,:,1,2] = Dx[:,:,0,1] = Dx[:,:,2,1] = -1/4
         self.Dx = nn.Parameter(data=Dx, requires_grad=False)
-        Dy = torch.zeros([1,1,3,3],dtype=torch.float)
-        Dy[:,:,1,1] = 1
-        Dy[:,:,2,1] = -1
-        self.Dy = nn.Parameter(data=Dy, requires_grad=False)
 
         self.iteration_num = 0
         
@@ -236,45 +232,42 @@ class BayeSeg(SegmentationNetwork):
 
         if self.iteration_num < 250:
             residual = samples - m
+            mu_rho_hat = (2*self.args.gamma_rho + 1) / (torch.clip(residual, -0.01, 0.01) * torch.clip(residual, -0.01, 0.01) + 2*self.args.phi_rho)
         else:
             residual = samples - (x + m)
+            mu_rho_hat = (2*self.args.gamma_rho + 1) / (residual * torch.clip(residual, -0.01, 0.01) + 2*self.args.phi_rho)
 
-        mu_rho_hat = (2*self.args.gamma_rho + 1) / (torch.clip(residual, -0.01, 0.01) * torch.clip(residual, -0.01, 0.01) + 2*self.args.phi_rho)
         normalization = torch.sum(mu_rho_hat).detach()
         n, _ = sample_normal_jit(m, torch.log(1 / mu_rho_hat))
         
         # Image line upsilon
         alpha_upsilon_hat = 2*self.args.gamma_upsilon + K
-        difference_x_x = F.conv2d(mu_x, self.Dx, padding=1)
-        difference_x_y = F.conv2d(mu_x, self.Dy, padding=1)
-        difference_x_2 = difference_x_x**2 + difference_x_y**2
-        beta_upsilon_hat = torch.sum(mu_z*(difference_x_2 + 4*torch.exp(log_var_x)),
+        difference_x = F.conv2d(mu_x, self.Dx, padding=1)
+        beta_upsilon_hat = torch.sum(mu_z*(difference_x * difference_x + 2*torch.exp(log_var_x)),
                                      dim = 1, keepdim = True) + 2*self.args.phi_upsilon  # B x 1 x W x H
         mu_upsilon_hat = alpha_upsilon_hat / beta_upsilon_hat
        
         # Seg boundary omega
-        difference_z_x = F.conv2d(mu_z, self.Dx.expand(K,1,3,3), padding=1, groups=K)  # B x K x W x H
-        difference_z_y = F.conv2d(mu_z, self.Dy.expand(K,1,3,3), padding=1, groups=K)  # B x K x W x H
-        difference_z_2 = difference_z_x**2 + difference_z_y**2
+        difference_z = F.conv2d(mu_z, self.Dx.expand(K,1,3,3), padding=1, groups=K)  # B x K x W x H
         alpha_omega_hat = 2*self.args.gamma_omega + 1
         pseudo_pi = torch.mean(mu_z, dim=(2,3), keepdim=True)
-        beta_omega_hat = pseudo_pi*(difference_z_2 + 4*torch.exp(log_var_z)) + 2*self.args.phi_omega
+        beta_omega_hat = pseudo_pi*(difference_z * difference_z + 2*torch.exp(log_var_z)) + 2*self.args.phi_omega
         mu_omega_hat = alpha_omega_hat / beta_omega_hat
  
         # Seg category probability pi
         _, _, W, H = samples.shape
         alpha_pi_hat = self.args.alpha_pi + W*H/2
-        beta_pi_hat = torch.sum(mu_omega_hat*(difference_z_2 + 4*torch.exp(log_var_z)), dim=(2,3), keepdim=True)/2 + self.args.beta_pi
+        beta_pi_hat = torch.sum(mu_omega_hat*(difference_z * difference_z + 2*torch.exp(log_var_z)), dim=(2,3), keepdim=True)/2 + self.args.beta_pi
         digamma_pi = torch.special.digamma(alpha_pi_hat + beta_pi_hat) - torch.special.digamma(beta_pi_hat)
         
         # compute loss-related
         kl_y = residual*mu_rho_hat.detach()*residual
 
-        kl_mu_z = torch.sum(digamma_pi.detach()*difference_z_2*mu_omega_hat.detach(), dim=1)
-        kl_sigma_z = torch.sum(digamma_pi.detach()*(4*torch.exp(log_var_z)*mu_omega_hat.detach() - log_var_z), dim=1)
+        kl_mu_z = torch.sum(digamma_pi.detach()*difference_z*mu_omega_hat.detach()*difference_z, dim=1)
+        kl_sigma_z = torch.sum(digamma_pi.detach()*(2*torch.exp(log_var_z)*mu_omega_hat.detach() - log_var_z), dim=1)
         
-        kl_mu_x = torch.sum(difference_x_2*mu_upsilon_hat.detach()*mu_z.detach(), dim=1)
-        kl_sigma_x = torch.sum(4*torch.exp(log_var_x)*mu_upsilon_hat.detach()*mu_z.detach(), dim=1) - log_var_x
+        kl_mu_x = torch.sum(difference_x*difference_x*mu_upsilon_hat.detach()*mu_z.detach(), dim=1)
+        kl_sigma_x = torch.sum(2*torch.exp(log_var_x)*mu_upsilon_hat.detach()*mu_z.detach(), dim=1) - log_var_x
         
         kl_mu_m = self.args.sigma_0*mu_m*mu_m
         kl_sigma_m = self.args.sigma_0*torch.exp(log_var_m) - log_var_m
@@ -536,20 +529,6 @@ class BayeSegTrainer(nnUNetTrainer):
                                      pad_sides=self.pad_all_sides, memmap_mode='r', pseudo_3d_slices=self.args.pseudo_3d_slices)
         return dl_tr, dl_val
     
-    def get_aux_generator(self):
-
-        aux_base_folder = "/home/gaoyibo/Datasets/nnUNet_datasets/nnUNet_preprocessed/ACDC"
-        self.folder_with_ACDC = join(aux_base_folder, "nnUNetData_plans_v2.1_2D_stage0")
-        aux_dataset = load_dataset(self.folder_with_ACDC)
-        basic_generator_patch_size = get_patch_size(self.patch_size, self.data_aug_params['rotation_x'],
-                                                    self.data_aug_params['rotation_y'],
-                                                    self.data_aug_params['rotation_z'],
-                                                    self.data_aug_params['scale_range'])
-        dl_aux = DataLoader_pseudo3D(aux_dataset, basic_generator_patch_size, self.patch_size, self.batch_size, pad_mode="constant",
-                                     pad_sides=self.pad_all_sides, memmap_mode='r', pseudo_3d_slices=self.args.pseudo_3d_slices)
-        gen_aux, _ = get_default_augmentation(dl_aux, None, self.patch_size, self.data_aug_params)
-        return gen_aux
-
     def initialize_network(self):
         unet = self.initialize_unet()
         self.args.num_classes = self.num_classes
@@ -608,11 +587,9 @@ class BayeSegTrainer(nnUNetTrainer):
 
         if training:
             self.dl_tr, self.dl_val = self.get_basic_generators()
-            self.dl_aux = self.get_aux_generator()
             if self.unpack_data:
                 self.print_to_log_file("unpacking dataset")
                 unpack_dataset(self.folder_with_preprocessed_data)
-                unpack_dataset(self.folder_with_ACDC)
                 self.print_to_log_file("done")
             else:
                 self.print_to_log_file(
@@ -651,12 +628,9 @@ class BayeSegTrainer(nnUNetTrainer):
         
         r = np.random.rand(1)
         if r < self.cutmix_prob and self.network.training:
-            aux_image = next(self.dl_aux)['data']
-            aux_image = maybe_to_torch(aux_image)
-            aux_image = to_cuda(aux_image)
+            rand_index = torch.randperm(data.size()[0]).cuda()
             bbx1, bby1, bbx2, bby2 = rand_bbox(data.size(), self.args.cut_ratio)
-            aux_image[:, :, bbx1:bbx2, bby1:bby2] = data[:, :, bbx1:bbx2, bby1:bby2]
-            data = aux_image
+            data[:, :, bbx1:bbx2, bby1:bby2] = data[rand_index, :, bbx1:bbx2, bby1:bby2]
 
         self.optimizer.zero_grad()
 
