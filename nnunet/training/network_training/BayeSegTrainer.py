@@ -293,10 +293,11 @@ class BayeSeg(SegmentationNetwork):
                'visualize':visualize,
               }
         
-        # self.save_image(x, 'contour')
+        self.save_image(x, 'contour')
         # self.save_image(m, 'basis')
         # self.save_image(mu_upsilon_hat, 'line')
-        # self.save_image(samples, 'input')
+        self.save_image(samples, 'input')
+        self.save_image(mu_z, 'output')
 
         return out
     
